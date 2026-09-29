@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>F-Engineering Launcher v3</title>
+  <link rel="stylesheet" href="styles.css?v=20260928-winapp-import-fetchfix">
+  <link rel="icon" type="image/png" href="assets/flauncher.png">
+</head>
+<body>
+  <div class="app-window">
+    <div class="action-grid" aria-label="Действия с объектом">
+      <button id="backToObjects" type="button" disabled title="Вернуться к списку загруженных объектов">Объекты</button>
+      <button id="loadObject" type="button" title="Добавить новый объект в Launcher через системный диалог выбора папки Windows. Исходная папка не переносится и не меняется.">Загрузить</button>
+      <button id="refreshObject" type="button" disabled title="Проверить выбранный объект заново: сравнить с предыдущим сканом и показать добавленные, изменённые и удалённые файлы без потери контекста.">Обновить</button>
+      <button id="displayObject" type="button" disabled title="Открыть выбранный объект: показать дерево, поиск и фильтры файлов.">Отобразить</button>
+      <button id="backToTree" type="button" disabled title="Вернуться к предыдущему состоянию дерева">Назад</button>
+      <button id="btnSettings" type="button" title="Параметры лаунчера и ассоциации программ">Параметры</button>
+      <button id="excludeObject" type="button" disabled title="Убрать объект из списка Launcher. Исходная папка не удаляется.">Исключить</button>
+      <div class="scale-widget" id="scaleWidget" title="Масштаб отображения. Нажмите 100% для возврата к исходному состоянию">
+        <button id="scaleMinusBtn" type="button" class="scale-btn" title="Уменьшить масштаб (дерево и миниатюры)">−</button>
+        <button id="scaleResetBtn" type="button" class="scale-btn scale-reset" title="Сбросить масштаб на 100%">100%</button>
+        <button id="scalePlusBtn" type="button" class="scale-btn" title="Увеличить масштаб (дерево и миниатюры)">+</button>
+      </div>
+      <span id="app-version-badge" class="version-badge" title="Версия лаунчера">v...</span>
+    </div>
+    <div class="progress-panel" id="progressPanel" hidden>
+      <div class="progress-head"><span id="progressLabel">Операция…</span><strong id="progressValue">0%</strong></div>
+      <div class="progress-track"><span id="progressFill"></span></div>
+      <div class="progress-detail" id="progressDetail">Подготовка</div>
+      <button class="cancel-button" id="cancelOperation" type="button">Отменить</button>
+    </div>
+    <main class="shell">
+      <aside class="sidebar" id="sidebar">
+        <section class="state active" id="objectListState">
+          <div class="object-list" id="objectList"></div>
+          <div class="stats" id="objectStats">Объект не выбран</div>
+        </section>
+
+        <section class="state" id="treeState">
+          <input class="search-input" id="treeSearch" type="search" placeholder="Поиск: pdf, разрез, спецификация…" spellcheck="false">
+          <div class="format-strip" id="formatStrip"></div>
+          <div class="tree" id="objectTree"></div>
+        </section>
+      </aside>
+
+      <section class="viewer" aria-label="Область просмотра PDF">
+        <div class="pdf-viewer empty" id="pdfViewer">
+        <div class="welcome-panel" id="welcomePanel">
+          <div class="welcome-card">
+            <div class="welcome-header">
+              <div class="welcome-icon">
+                <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#2563eb" stroke-width="1.8">
+                  <path d="M4 4h7l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/>
+                  <path d="M8 13h8M8 17h5" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <div class="welcome-title-group">
+                <div class="welcome-title">F-Engineering Launcher v3</div>
+                <div class="welcome-subtitle">Консоль управления библиотекой рабочей документации</div>
+              </div>
+            </div>
+            <div class="welcome-divider"></div>
+            <div class="welcome-section-title">Назначение кнопок и элементов управления:</div>
+            <div class="welcome-grid">
+              <div class="welcome-item">
+                <span class="welcome-bullet">📥</span>
+                <div>
+                  <strong>Загрузить</strong>
+                  <p>Выбор папки с чертежами и документами через системный проводник Windows. Лаунчер сканирует каталог, индексирует файлы (PDF, DWG, DOC, XLS) и генерирует быстрые миниатюры. Исходные файлы на диске не перемещаются и не изменяются.</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">📂</span>
+                <div>
+                  <strong>Отобразить</strong>
+                  <p>Открытие структуры выбранного объекта. Слева разворачивается дерево томов, разделов и файлов с поиском и фильтрами по форматам, справа — лента миниатюр чертежей.</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">🔄</span>
+                <div>
+                  <strong>Обновить</strong>
+                  <p>Повторное сканирование папки объекта на диске. Лаунчер выполняет дифференциальный контроль: выявляет добавленные, удалённые и изменённые файлы без потери меток и структуры.</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">❌</span>
+                <div>
+                  <strong>Исключить</strong>
+                  <p>Удаление объекта из списка лаунчера. Исходные файлы и папки на вашем компьютере остаются нетронутыми в полной сохранности.</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">⬅️</span>
+                <div>
+                  <strong>К объектам / Назад</strong>
+                  <p>Кнопка «К объектам» возвращает из дерева файлов к общему списку проектов. Кнопка «Назад» возвращает к предыдущему раскрытому узлу папок.</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">⌨️</span>
+                <div>
+                  <strong>Клавиша Escape — универсальный возврат</strong>
+                  <p>Клавиша <code>Escape</code> всегда делает шаг назад: из полноэкранного просмотра чертежа ➔ в ленту миниатюр; из дерева файлов ➔ возврат к списку объектов; со списка объектов ➔ снятие выделения. Несколько нажатий <code>Escape</code> всегда возвращают вас на этот начальный экран!</p>
+                </div>
+              </div>
+              <div class="welcome-item">
+                <span class="welcome-bullet">🔎</span>
+                <div>
+                  <strong>Масштабирование (дерево и чертежи)</strong>
+                  <p>Колёсико мыши над списками и чертежами или кнопки <code>−</code> / <code>100%</code> / <code>+</code> в верхней панели изменяют масштаб без расплывания окон. Нажатие на <code>100%</code> мгновенно сбрасывает масштаб к исходному состоянию.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="pdf-thumbs" id="pdfThumbs"></div>
+        <div class="pdf-stage" id="pdfStage">
+          <div class="viewer-empty" id="viewerEmpty"></div>
+          <div class="quality-badge" id="qualityBadge" hidden style="display:none!important;"></div>
+          <div class="page-position" id="pagePosition" hidden></div>
+          <img id="pdfPageImage" alt="" hidden>
+          <div class="txt-viewer" id="txtViewer" hidden><pre id="txtContent"></pre></div>
+          <section class="excel-viewer" id="excelViewer" hidden aria-label="Просмотр Excel-книги">
+            <div class="excel-book-title" id="excelBookTitle" title=""></div>
+            <div class="excel-tabs-bar">
+              <button class="excel-tabs-step" id="excelTabsLeft" type="button" title="Предыдущие вкладки">‹</button>
+              <div class="excel-tabs" id="excelTabs" aria-label="Листы Excel"></div>
+              <button class="excel-tabs-step" id="excelTabsRight" type="button" title="Следующие вкладки">›</button>
+            </div>
+            <iframe class="excel-sheet-frame" id="excelSheetFrame" title="Лист Excel" loading="lazy"></iframe>
+          </section>
+          <div class="viewer-controls" id="viewerControls" hidden>
+            <button id="viewOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть</button>
+            <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
+            <button id="viewZoomIn" type="button" title="Увеличить">+</button>
+            <button id="viewFit" type="button" title="Вписать страницу">Вписать</button>
+            <button id="viewRotate" type="button" title="Повернуть на 90°">⟳</button>
+            <button id="viewPanMode" type="button" title="Рука / стрелка" aria-label="Рука / стрелка">
+              <svg class="hand-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8.2 11.2V5.7a1.25 1.25 0 0 1 2.5 0v5.1" />
+                <path d="M10.7 10.6V4.8a1.25 1.25 0 0 1 2.5 0v5.8" />
+                <path d="M13.2 10.8V6.1a1.25 1.25 0 0 1 2.5 0v5.5" />
+                <path d="M15.7 12V8.2a1.2 1.2 0 0 1 2.4 0v6.1c0 4-2.5 6.7-6.3 6.7h-.9c-2.2 0-3.7-.9-5-2.8L3.6 15a1.35 1.35 0 0 1 2.1-1.7l2.1 2.1" />
+              </svg>
+            </button>
+            <button id="viewStandardMode" type="button" title="Режим 1: два поля (левое и правое)">▦</button>
+            <button id="viewFullMode" type="button" title="Крупный режим (на весь экран)">▢</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  </div>
+
+  <!-- Диалоговое окно "Параметры" -->
+  <div class="modal-overlay" id="settingsModal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="settingsModalTitle" aria-modal="true">
+      <div class="modal-header">
+        <span id="settingsModalTitle">Параметры — Ассоциации программ</span>
+        <button type="button" class="modal-close" id="settingsCloseBtn" title="Закрыть (Escape)">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-lead">
+          Для каждого типа файлов укажите полный путь к исполняемому файлу (.exe) нативной программы.
+          Кнопка «Обзор…» поможет найти файл. Пустое поле — этот тип открывается только через меню правой кнопки.
+        </div>
+        <div class="settings-toolbar">
+          <button type="button" class="settings-btn" id="settingsFillEmptyBtn" title="Найти ассоциации Windows и заполнить только пустые поля, не затрагивая существующие настройки">
+            ⚡ Заполнить пустые поля из настроек Windows
+          </button>
+          <button type="button" class="settings-btn" id="settingsOpenWinSettingsBtn" title="Открыть раздел «Приложения по умолчанию» в параметрах Windows">
+            ⚙ Открыть настройки приложений Windows
+          </button>
+        </div>
+        <div id="settingsDwgHint" class="settings-dwg-hint" hidden></div>
+        <div class="settings-form" id="settingsAppsForm"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-btn-primary" id="settingsSaveBtn">Сохранить</button>
+        <button type="button" class="modal-btn" id="settingsCancelBtn">Отмена</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden aria-live="polite"></div>
+  <div id="contextMenu" class="context-menu" hidden></div>
+    <script src="app.js?v=20260928-winapp-import-fetchfix"></script>
+</body>
+</html>

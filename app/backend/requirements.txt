@@ -1,0 +1,8 @@
+# F-Engineering Platform v3.2 — backend + fast rendering core.
+# Install: python -m pip install -r app/backend/requirements.txt
+pymupdf==1.27.2.3     # CAD/PDF raster, 150 DPI PNG (cad_proxy, pdf pipeline)
+pypdf==6.12.2         # PDF merge fallback (no fitz needed)
+openpyxl==3.1.5       # modern Excel single-parse (excel_fast)
+xlrd==2.0.1           # legacy .xls instant open (excel_fast)
+python-docx==1.1.2    # fast DOCX -> clean HTML (word_fast)
+Pillow==11.1.0        # safe EXIF + screen raster (image_safe)

@@ -1,0 +1,11 @@
+# F-Engineering Platform — never commit derived or local data.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+cache/
+logs/
+*.tmp
+*.log
+runtime/
+*.bak
