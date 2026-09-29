@@ -79,7 +79,20 @@ public class LauncherMessageFilter : IOleMessageFilter
 }
 [LauncherMessageFilter]::Register()
 
-#               CAD       COM-         
+# SINGLE-INSTANCE: межпроцессная блокировка — запросы печати разных DWG
+# выполняются последовательно через одну сессию, не порождая дубли acad.exe.
+# Имя Mutex глобальное, чтобы сериализовать и параллельные powershell-процессы.
+$cadMutex = $null
+$cadMutexOwned = $false
+try {
+  $cadMutex = New-Object System.Threading.Mutex($false, "Global\FEngineering_AutoCAD_Render")
+  $cadMutexOwned = $cadMutex.WaitOne([TimeSpan]::FromMinutes(10))
+  if (-not $cadMutexOwned) { throw "Не удалось захватить Mutex AutoCAD-рендера за 10 минут." }
+} catch {
+  throw "AutoCAD single-instance lock failed: $_"
+}
+
+#               CAD       COM-
 $comProgIds = @(
   "AutoCAD.Application.25",
   "AutoCAD.Application.24.3",
@@ -93,16 +106,39 @@ $comProgIds = @(
   "AutoCAD.Application"
 )
 
+# SINGLE-INSTANCE: строгое переиспользование уже запущенной сессии.
+# Сначала пробуем подключиться к активному экземпляру (без нового процесса),
+# и только если его нет — создаём один новый. ЗАПРЕЩЕНО плодить параллельные acad.exe.
 $app = $null
 $usedProgId = ""
+$ownedSession = $false
+$reusedSession = $false
 foreach ($progId in $comProgIds) {
   try {
-    $app = New-Object -ComObject $progId -ErrorAction Stop
-    if ($app) {
+    $candidate = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
+    if ($candidate) {
+      $app = $candidate
       $usedProgId = $progId
+      $reusedSession = $true
+      $ownedSession = $false
+      Write-Output ("REUSE active AutoCAD session progId={0} (no new acad.exe)" -f $progId)
       break
     }
   } catch {}
+}
+if (-not $app) {
+  foreach ($progId in $comProgIds) {
+    try {
+      $app = New-Object -ComObject $progId -ErrorAction Stop
+      if ($app) {
+        $usedProgId = $progId
+        $ownedSession = $true
+        $reusedSession = $false
+        Write-Output ("CREATE new AutoCAD session progId={0} (none was running)" -f $progId)
+        break
+      }
+    } catch {}
+  }
 }
 
 if (-not $app) {
@@ -386,14 +422,23 @@ except ImportError:
     try { $document.Close($false) } catch {}
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
   }
+  # SINGLE-INSTANCE: чужую (переиспользованную) сессию НЕ гасим — только
+  # отсоединяемся от COM, процесс acad.exe остаётся жить для следующего DWG.
+  # Quit + kill PID разрешены ТОЛЬКО если сессию создали мы сами ($ownedSession).
   if ($app) {
-    try { $app.Quit() } catch {}
+    if ($ownedSession) {
+      try { $app.Quit() } catch {}
+    }
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
   }
   [System.GC]::Collect()
   [System.GC]::WaitForPendingFinalizers()
 
-  if ($cadPid -and $cadPid -gt 0) {
+  # NO-AUTO-OPEN: сгенерированный PDF НИКОГДА не открывается внешним просмотрщиком.
+  # Здесь запрещены Start-Process / Invoke-Item / & $OutputPath при любых условиях,
+  # включая плоттер "DWG To PDF.pc3". Печать идёт только через Plot.PlotToFile($pageFile),
+  # параметр «открывать файл после печати» всегда выключен (PlotToFile его не выставляет).
+  if ($ownedSession -and $cadPid -and $cadPid -gt 0) {
     $deadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $deadline) {
       $p = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
@@ -410,5 +455,11 @@ except ImportError:
 
   if (Test-Path -LiteralPath $tempDir) {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  # Освобождаем single-instance Mutex всегда (и при reuse, и при own).
+  if ($cadMutex) {
+    try { if ($cadMutexOwned) { $cadMutex.ReleaseMutex() } } catch {}
+    try { $cadMutex.Dispose() } catch {}
   }
 }

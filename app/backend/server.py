@@ -736,6 +736,11 @@ def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = 
 _DWG_DAEMON_LOCK = threading.Lock()
 _DWG_DAEMON_PROC: subprocess.Popen | None = None
 
+# SINGLE-INSTANCE: очередь печати DWG на уровне server.py.
+# Параллельные HTTP-запросы рендера выполняются строго последовательно
+# через одну CAD-сессию — второй acad.exe не порождается.
+_DWG_RENDER_LOCK = threading.Lock()
+
 
 class _DwgFileError(RuntimeError):
     """Файл не конвертируется (демон отработал, CAD отказался). Повтор разово бессмысленен."""
@@ -979,7 +984,29 @@ def dwg_convert_process(
     fallback_pdf: Path,
     script_to_run: Path,
 ) -> subprocess.CompletedProcess:
-    """Конвертация DWG в PDF: сначала быстрый нативный accoreconsole + _.-EXPORT _PDF, при сбое — CAD-сессия."""
+    """Конвертация DWG в PDF: сначала быстрый нативный accoreconsole + _.-EXPORT _PDF, при сбое — CAD-сессия.
+
+    SINGLE-INSTANCE: весь путь конвертации сериализован через _DWG_RENDER_LOCK,
+    чтобы два параллельных запроса не подняли два acad.exe.
+    Сгенерированный PDF никогда не открывается внешним просмотрщиком:
+    здесь нет Start-Process/os.startfile — только запись файла на диск.
+    """
+    with _DWG_RENDER_LOCK:
+        return _dwg_convert_process_locked(
+            path=path,
+            paired_pdf=paired_pdf,
+            fallback_pdf=fallback_pdf,
+            script_to_run=script_to_run,
+        )
+
+
+def _dwg_convert_process_locked(
+    *,
+    path: Path,
+    paired_pdf: Path,
+    fallback_pdf: Path,
+    script_to_run: Path,
+) -> subprocess.CompletedProcess:
     # 1. ПРИОРИТЕТ: Консоль accoreconsole.exe + нативная команда _.-EXPORT _PDF.
     # Запускается за доли секунды, не поднимает GUI, не мигает окнами, не тратит память на ленту.
     try:
