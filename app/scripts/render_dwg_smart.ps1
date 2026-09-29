@@ -79,6 +79,20 @@ public class LauncherMessageFilter : IOleMessageFilter
 }
 [LauncherMessageFilter]::Register()
 
+function Set-DocOptimizationSettings($doc) {
+  if (-not $doc) { return }
+  try { $doc.SetVariable("LAYOUTREGENCTL", 2) } catch {}
+  try { $doc.SetVariable("REGENMODE", 0) } catch {}
+  try { $doc.SetVariable("BACKGROUNDPLOT", 0) } catch {}
+  try { $doc.SetVariable("EXPERT", 5) } catch {}
+  try { $doc.SetVariable("ONLINESTATUS", 0) } catch {}
+  try { $doc.SetVariable("WSCOMMNTR", 0) } catch {}
+  try { $doc.SetVariable("VIEWDOC", 0) } catch {}
+  try { $doc.SetVariable("RASTERPREVIEW", 0) } catch {}
+  try { $doc.SendCommand("(setvar `"VIEWDOC`" 0) ") } catch {}
+  try { $doc.SendCommand("(setvar `"RASTERPREVIEW`" 0) ") } catch {}
+}
+
 # SINGLE-INSTANCE: межпроцессная блокировка — запросы печати разных DWG
 # выполняются последовательно через одну сессию, не порождая дубли acad.exe.
 # Имя Mutex глобальное, чтобы сериализовать и параллельные powershell-процессы.
@@ -107,25 +121,44 @@ $comProgIds = @(
 )
 
 # SINGLE-INSTANCE: строгое переиспользование уже запущенной сессии.
-# Сначала пробуем подключиться к активному экземпляру (без нового процесса),
-# и только если его нет — создаём один новый. ЗАПРЕЩЕНО плодить параллельные acad.exe.
+# Сначала пробуем подключиться к активному экземпляру (без нового процесса).
+# Если в системе уже есть запущенные процессы acad.exe, но подключиться к ним через COM
+# не удается — это зависшие зомби-процессы от прошлых сбоев: принудительно гасим их перед
+# созданием нового экземпляра, чтобы НЕ плодить параллельные процессы и не исчерпывать RAM!
 $app = $null
 $usedProgId = ""
 $ownedSession = $false
 $reusedSession = $false
-foreach ($progId in $comProgIds) {
-  try {
-    $candidate = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
-    if ($candidate) {
-      $app = $candidate
-      $usedProgId = $progId
-      $reusedSession = $true
-      $ownedSession = $false
-      Write-Output ("REUSE active AutoCAD session progId={0} (no new acad.exe)" -f $progId)
-      break
+
+$existingAcad = @(Get-Process -Name 'acad' -ErrorAction SilentlyContinue)
+if ($existingAcad.Count -gt 0) {
+  Write-Output ("CHECK: Detected {0} running acad.exe process(es)." -f $existingAcad.Count)
+  foreach ($progId in $comProgIds) {
+    try {
+      $candidate = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
+      if ($candidate) {
+        $app = $candidate
+        $usedProgId = $progId
+        $reusedSession = $true
+        $ownedSession = $false
+        Write-Output ("REUSE active AutoCAD session progId={0} (no new acad.exe)" -f $progId)
+        break
+      }
+    } catch {}
+  }
+  if (-not $app) {
+    Write-Output "AutoCAD process(es) exist but are unresponsive to COM. Terminating zombie instances before creating new one..."
+    foreach ($p in $existingAcad) {
+      try {
+        if ($p.MainWindowHandle -eq 0 -or [string]::IsNullOrWhiteSpace($p.MainWindowTitle)) {
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+      } catch {}
     }
-  } catch {}
+    Start-Sleep -Milliseconds 500
+  }
 }
+
 if (-not $app) {
   foreach ($progId in $comProgIds) {
     try {
@@ -185,74 +218,100 @@ try {
   try { $document.SetVariable("ONLINESTATUS", 0) } catch {}
   try { $document.SetVariable("WSCOMMNTR", 0) } catch {}
   # NO-VIEWER (жесткий запрет автооткрытия PDF просмотрщиком):
-  # У плоттера "DWG To PDF.pc3" бывает активна опция "Show results in viewer"
-  # ("Открыть в программе просмотра") — тогда AutoCAD сам открывает Acrobat/Edge
-  # после печати. Глушим все известные переключатели; неизвестные имена
-  # НЕ должны ронять рендер (все вызовы в try/catch).
-  try { $document.SetVariable("VIEWDOC", 0) } catch {}
-  try { $document.SetVariable("RASTERPREVIEW", 0) } catch {}
-  try { $document.SendCommand("(setvar `"VIEWDOC`" 0) ") } catch {}
-  try { $document.SendCommand("(setvar `"RASTERPREVIEW`" 0) ") } catch {}
-  # NO-VIEWER (реестр): снять "Open in PDF viewer when done" (ShowPlotViewer=0),
-  # ТОЛЬКО если такой параметр уже существует — новых значений не создаём,
-  # профиль AutoCAD не портим.
+  # По умолчанию в Autodesk PC3-драйверах (DWG To PDF.pc3, AutoCAD PDF.pc3) параметр
+  # View_New_File=TRUE, из-за чего pdfplot16.hdi вызывает ShellExecute (открывает Edge/Acrobat).
+  # Программно патчим все PC3 в папке Plotters AutoCAD, выставляя View_New_File=FALSE,
+  # и создаем/обновляем специализированный silent-драйвер FEng_Silent_DWG_To_PDF.pc3.
   try {
-    $acadRegRoot = "HKCU:\Software\Autodesk\AutoCAD"
-    if (Test-Path -LiteralPath $acadRegRoot) {
-      Get-ChildItem -LiteralPath $acadRegRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        try {
-          $regProps = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
-          if ($null -ne $regProps) {
-            foreach ($pn in @("ShowPlotViewer", "OpenInViewer", "ShowResultsInViewer")) {
-              if ($regProps.PSObject.Properties.Name -contains $pn) {
-                try {
-                  if ($regProps.$pn -ne 0) {
-                    Set-ItemProperty -LiteralPath $_.PSPath -Name $pn -Value 0 -ErrorAction Stop
-                    Write-Output ("NO-VIEWER registry: {0}\{1}=0" -f $_.PSChildName, $pn)
-                  }
-                } catch {}
-              }
-            }
-          }
-        } catch {}
+    $plotterDirs = @()
+    if ($app -and $app.Preferences -and $app.Preferences.Files) {
+      $cadPlotterPath = $app.Preferences.Files.PrinterConfigPath
+      if ($cadPlotterPath -and (Test-Path -LiteralPath $cadPlotterPath)) {
+        $plotterDirs += $cadPlotterPath
       }
     }
-  } catch {}
+    $patchScript = Join-Path $PSScriptRoot "patch_silent_plotters.py"
+    if ((Test-Path -LiteralPath $patchScript) -and (-not [string]::IsNullOrWhiteSpace($PythonExe)) -and (Test-Path -LiteralPath $PythonExe)) {
+      & $PythonExe $patchScript $plotterDirs | Out-Null
+    }
+  } catch {
+    Write-Output ("DEBUG: silent plotter patch exception: $_")
+  }
+
+  try { $document.Plot.QuietErrorMode = $true } catch {}
+  try { $document.Plot.BatchPlotProgress = $false } catch {}
 
   #                 (Layouts)
-  $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
-  $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
+  $rawCandidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
+  $layoutEntries = @()
+  foreach ($cl in $rawCandidateLayouts) {
+    try {
+      if ($cl.Block.Count -gt 1) {
+        $layoutEntries += [PSCustomObject]@{
+          Name = [string]$cl.Name
+          TabOrder = [int]$cl.TabOrder
+        }
+      }
+    } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($cl) | Out-Null } catch {}
+  }
 
   $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
+  Write-Output ("START layouts_total={0} layouts_nonempty={1} input={2}" -f $rawCandidateLayouts.Count, $layoutEntries.Count, $InputPath)
 
-  Write-Output ("START layouts_total={0} layouts_nonempty={1} input={2}" -f $candidateLayouts.Count, $nonEmptyLayouts.Count, $InputPath)
+  $cacheDir = ".\cache"
+  if (-not (Test-Path -LiteralPath $cacheDir)) {
+    try { New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null } catch {}
+  }
+  $inputBaseName = [System.IO.Path]::GetFileNameWithoutExtension($InputPath)
 
-  if ($nonEmptyLayouts.Count -gt 0) {
-    #                       
-    foreach ($layout in $nonEmptyLayouts) {
+  if ($layoutEntries.Count -gt 0) {
+    foreach ($entry in $layoutEntries) {
+      $layoutName = $entry.Name
+      $tabOrder = $entry.TabOrder
+      $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $tabOrder)
+      $sheetPngPath = Join-Path $cacheDir ("{0}_sheet_{1:D2}.png" -f $inputBaseName, $tabOrder)
+
+      # RESUME: готовая страница из прошлого запуска — пропускаем печать, берём из кэша.
+      if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
+        Write-Output ("PAGE_EXISTS: {0} skipping render, using cached page" -f $tabOrder)
+        $pagePdfPaths.Add($pageFile)
+        continue
+      }
+
+      $layout = $null
+      try {
+        $layout = $document.Layouts.Item($layoutName)
+      } catch {
+        Write-Output ("DEBUG: Could not access layout '{0}': $_" -f $layoutName)
+        continue
+      }
+
       $document.ActiveLayout = $layout
 
-      # BENCH-WINNER: trust stored page setup; touch the plotter only if the
-      # current device is missing. No unconditional RefreshPlotDeviceInfo().
+      # ENSURE SILENT PLOTTER: гарантируем использование плоттера с View_New_File=FALSE
       $devices = @($layout.GetPlotDeviceNames())
-      $currentDevice = $layout.ConfigName
-      if (-not ($currentDevice -and ($devices -contains $currentDevice))) {
-        $preferredDevices = @(
-          "DWG To PDF.pc3",
-          "AutoCAD PDF (General Documentation).pc3",
-          "AutoCAD PDF (High Quality Print).pc3",
-          "Microsoft Print to PDF"
-        )
-        foreach ($dev in $preferredDevices) {
-          if ($devices -contains $dev) {
-            try {
-              $layout.ConfigName = $dev
-              $layout.RefreshPlotDeviceInfo()
-            } catch {
-              Write-Output ("DEBUG: ConfigName {0} rejected, keeping stored device" -f $dev)
-            }
-            break
-          }
+      $preferredSilentDevices = @(
+        "FEng_Silent_DWG_To_PDF.pc3",
+        "DWG To PDF.pc3",
+        "AutoCAD PDF (General Documentation).pc3",
+        "AutoCAD PDF (High Quality Print).pc3",
+        "AutoCAD PDF (Smallest File).pc3",
+        "AutoCAD PDF (Web and Mobile).pc3"
+      )
+      $chosenDevice = $null
+      foreach ($dev in $preferredSilentDevices) {
+        if ($devices -contains $dev) {
+          $chosenDevice = $dev
+          break
+        }
+      }
+      if ($chosenDevice -and ($layout.ConfigName -ne $chosenDevice)) {
+        try {
+          $layout.ConfigName = $chosenDevice
+          $layout.RefreshPlotDeviceInfo()
+        } catch {
+          Write-Output ("DEBUG: ConfigName {0} rejected, keeping stored device" -f $chosenDevice)
         }
       }
 
@@ -292,18 +351,86 @@ try {
       }
       $layout.PlotWithLineweights = $true
       $layout.PlotWithPlotStyles = $true
+      try { $document.Plot.QuietErrorMode = $true } catch {}
+      try { $document.Plot.BatchPlotProgress = $false } catch {}
 
-      $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $layout.TabOrder)
-      # RESUME: готовая страница из прошлого запуска — пропускаем печать, берём из кэша.
-      if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
-        Write-Output ("PAGE_EXISTS: {0} skipping render, using cached page" -f $layout.TabOrder)
-        $pagePdfPaths.Add($pageFile)
-        continue
-      }
       if ($document.Plot.PlotToFile($pageFile)) {
         if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
           $pagePdfPaths.Add($pageFile)
-          Write-Output ("PROGRESS layout={0} done={1}/{2} file={3}" -f $layout.TabOrder, $pagePdfPaths.Count, $nonEmptyLayouts.Count, [System.IO.Path]::GetFileName($pageFile))
+
+          # 2. ПОЛИСТНО: СРАЗУ сохраняем PNG на диск в .\cache\
+          try {
+            if (-not [string]::IsNullOrWhiteSpace($PythonExe) -and (Test-Path -LiteralPath $PythonExe)) {
+              & $PythonExe -c "import sys, fitz; doc = fitz.open(sys.argv[1]); page = doc.load_page(0); page.get_pixmap(dpi=150).save(sys.argv[2]); doc.close()" "$pageFile" "$sheetPngPath"
+            }
+          } catch {
+            Write-Output ("DEBUG: failed to render sheet PNG: $_")
+          }
+
+          Write-Output ("PROGRESS layout={0} done={1}/{2} file={3} png={4}" -f $tabOrder, $pagePdfPaths.Count, $layoutEntries.Count, [System.IO.Path]::GetFileName($pageFile), [System.IO.Path]::GetFileName($sheetPngPath))
+        }
+      }
+
+      # СБРОС COM-ОБЪЕКТА ЛИСТА И ПАМЯТИ ПОСЛЕ КАЖДОГО ЛИСТА
+      try {
+        if ($layout) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($layout) | Out-Null }
+      } catch {}
+      $layout = $null
+      [System.GC]::Collect()
+      [System.GC]::WaitForPendingFinalizers()
+
+      # 3. ЖЕСТКИЙ КОНТРОЛЬ ПАМЯТИ: если процесс acad.exe превышает 2.5 ГБ RAM — перезапуск!
+      if ($cadPid -and $cadPid -gt 0) {
+        try {
+          $procCheck = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+          if ($procCheck) {
+            $wsMB = [math]::Round($procCheck.WorkingSet64 / 1MB, 1)
+            $privMB = [math]::Round($procCheck.PrivateMemorySize64 / 1MB, 1)
+            Write-Output ("CAD MEM CHECK layout={0}: RAM={1} MB, Private={2} MB" -f $tabOrder, $wsMB, $privMB)
+            if ($wsMB -gt 2500 -or $privMB -gt 2500) {
+              Write-Output ("WARNING: acad.exe (PID {0}) exceeded 2.5 GB memory limit (RAM={1}MB, Private={2}MB)! Restarting AutoCAD to prevent memory leak and swap freeze..." -f $cadPid, $wsMB, $privMB)
+
+              try { if ($document) { $document.Close($false) } } catch {}
+              try { if ($document) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } } catch {}
+              $document = $null
+
+              if ($app) {
+                try { $app.Quit() } catch {}
+                try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
+                $app = $null
+              }
+
+              try {
+                $oldP = Get-Process -Id $cadPid -ErrorAction SilentlyContinue
+                if ($oldP -and -not $oldP.HasExited) {
+                  Stop-Process -Id $cadPid -Force -ErrorAction SilentlyContinue
+                }
+              } catch {}
+
+              [System.GC]::Collect()
+              [System.GC]::WaitForPendingFinalizers()
+              Start-Sleep -Seconds 1
+
+              # Пересоздаем сессию AutoCAD
+              $app = New-Object -ComObject $usedProgId -ErrorAction Stop
+              $ownedSession = $true
+              $reusedSession = $false
+              $app.Visible = $false
+
+              try {
+                $hwnd = [IntPtr]::new([long]$app.HWND)
+                [uint32]$newPid = 0
+                [void][LauncherWin32]::GetWindowThreadProcessId($hwnd, [ref]$newPid)
+                if ($newPid -gt 0) { $cadPid = [int]$newPid }
+              } catch {}
+              Write-Output ("AutoCAD session refreshed successfully with PID {0}. Resuming..." -f $cadPid)
+
+              $document = $app.Documents.Open($InputPath, $true)
+              Set-DocOptimizationSettings $document
+            }
+          }
+        } catch {
+          Write-Output ("DEBUG: Memory check error: $_")
         }
       }
     }
@@ -313,21 +440,27 @@ try {
   if ($pagePdfPaths.Count -eq 0) {
     $layout = $document.ModelSpace.Layout
     $devices = @($layout.GetPlotDeviceNames())
-    $preferredDevices = @(
+    $preferredSilentDevices = @(
+      "FEng_Silent_DWG_To_PDF.pc3",
       "DWG To PDF.pc3",
-        "AutoCAD PDF (General Documentation).pc3",
-        "AutoCAD PDF (High Quality Print).pc3",
-      "Microsoft Print to PDF"
+      "AutoCAD PDF (General Documentation).pc3",
+      "AutoCAD PDF (High Quality Print).pc3",
+      "AutoCAD PDF (Smallest File).pc3",
+      "AutoCAD PDF (Web and Mobile).pc3"
     )
-    foreach ($dev in $preferredDevices) {
+    $chosenDevice = $null
+    foreach ($dev in $preferredSilentDevices) {
       if ($devices -contains $dev) {
-        try {
-          $layout.ConfigName = $dev
-          $layout.RefreshPlotDeviceInfo()
-        } catch {
-          Write-Output ("DEBUG: model ConfigName {0} rejected, keeping stored device" -f $dev)
-        }
+        $chosenDevice = $dev
         break
+      }
+    }
+    if ($chosenDevice -and ($layout.ConfigName -ne $chosenDevice)) {
+      try {
+        $layout.ConfigName = $chosenDevice
+        $layout.RefreshPlotDeviceInfo()
+      } catch {
+        Write-Output ("DEBUG: model ConfigName {0} rejected, keeping stored device" -f $chosenDevice)
       }
     }
     $allMedia = @($layout.GetCanonicalMediaNames())
@@ -350,13 +483,25 @@ try {
     $layout.StandardScale = 0 # acScaleToFit
     $layout.PlotWithLineweights = $false
     $layout.PlotWithPlotStyles = $true
+    try { $document.Plot.QuietErrorMode = $true } catch {}
+    try { $document.Plot.BatchPlotProgress = $false } catch {}
 
     $modelPageFile = Join-Path $tempDir "page_model.pdf"
     if ($document.Plot.PlotToFile($modelPageFile)) {
       if ((Test-Path -LiteralPath $modelPageFile) -and (Get-Item -LiteralPath $modelPageFile).Length -gt 1024) {
         $pagePdfPaths.Add($modelPageFile)
+        $sheetPngPath = Join-Path $cacheDir ("{0}_sheet_model.png" -f $inputBaseName)
+        try {
+          if (-not [string]::IsNullOrWhiteSpace($PythonExe) -and (Test-Path -LiteralPath $PythonExe)) {
+            & $PythonExe -c "import sys, fitz; doc = fitz.open(sys.argv[1]); page = doc.load_page(0); page.get_pixmap(dpi=150).save(sys.argv[2]); doc.close()" "$modelPageFile" "$sheetPngPath"
+          }
+        } catch {}
       }
     }
+    try { if ($layout) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($layout) | Out-Null } } catch {}
+    $layout = $null
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
   }
 
   # КРАЙНИЙ FALLBACK — native accoreconsole (_.-EXPORT _PDF, только Model, 1 стр.).
