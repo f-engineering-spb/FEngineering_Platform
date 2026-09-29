@@ -184,6 +184,40 @@ try {
   # Wrapped: unknown names must never abort a render (see ee84966).
   try { $document.SetVariable("ONLINESTATUS", 0) } catch {}
   try { $document.SetVariable("WSCOMMNTR", 0) } catch {}
+  # NO-VIEWER (жесткий запрет автооткрытия PDF просмотрщиком):
+  # У плоттера "DWG To PDF.pc3" бывает активна опция "Show results in viewer"
+  # ("Открыть в программе просмотра") — тогда AutoCAD сам открывает Acrobat/Edge
+  # после печати. Глушим все известные переключатели; неизвестные имена
+  # НЕ должны ронять рендер (все вызовы в try/catch).
+  try { $document.SetVariable("VIEWDOC", 0) } catch {}
+  try { $document.SetVariable("RASTERPREVIEW", 0) } catch {}
+  try { $document.SendCommand("(setvar `"VIEWDOC`" 0) ") } catch {}
+  try { $document.SendCommand("(setvar `"RASTERPREVIEW`" 0) ") } catch {}
+  # NO-VIEWER (реестр): снять "Open in PDF viewer when done" (ShowPlotViewer=0),
+  # ТОЛЬКО если такой параметр уже существует — новых значений не создаём,
+  # профиль AutoCAD не портим.
+  try {
+    $acadRegRoot = "HKCU:\Software\Autodesk\AutoCAD"
+    if (Test-Path -LiteralPath $acadRegRoot) {
+      Get-ChildItem -LiteralPath $acadRegRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+          $regProps = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+          if ($null -ne $regProps) {
+            foreach ($pn in @("ShowPlotViewer", "OpenInViewer", "ShowResultsInViewer")) {
+              if ($regProps.PSObject.Properties.Name -contains $pn) {
+                try {
+                  if ($regProps.$pn -ne 0) {
+                    Set-ItemProperty -LiteralPath $_.PSPath -Name $pn -Value 0 -ErrorAction Stop
+                    Write-Output ("NO-VIEWER registry: {0}\{1}=0" -f $_.PSChildName, $pn)
+                  }
+                } catch {}
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
 
   #                 (Layouts)
   $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
@@ -436,8 +470,11 @@ except ImportError:
 
   # NO-AUTO-OPEN: сгенерированный PDF НИКОГДА не открывается внешним просмотрщиком.
   # Здесь запрещены Start-Process / Invoke-Item / & $OutputPath при любых условиях,
-  # включая плоттер "DWG To PDF.pc3". Печать идёт только через Plot.PlotToFile($pageFile),
-  # параметр «открывать файл после печати» всегда выключен (PlotToFile его не выставляет).
+  # включая плоттер "DWG To PDF.pc3" (его "Show results in viewer" глушится выше
+  # через VIEWDOC=0 и реестр ShowPlotViewer=0). Печать идёт только через
+  # Plot.PlotToFile($pageFile), параметр «открывать файл после печати» всегда
+  # выключен (PlotToFile его не выставляет). EXPORTPDF не используется;
+  # если он появится — передавать OpenInViewer = False.
   if ($ownedSession -and $cadPid -and $cadPid -gt 0) {
     $deadline = (Get-Date).AddSeconds(3)
     while ((Get-Date) -lt $deadline) {
